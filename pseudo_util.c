@@ -614,12 +614,28 @@ pseudo_append_element(char *newpath, char *root, size_t allocated, char **pcurre
 	size_t curlen;
 	int is_dir = S_ISDIR(buf->st_mode);
 	char *current;
+	int is_proc = 0;
 	if (!newpath ||
 	    !pcurrent || !*pcurrent ||
 	    !root || !element) {
 		pseudo_diag("pseudo_append_element: invalid args.\n");
 		return -1;
 	}
+
+	/* If we end up resolving a path into /proc, it has special meaning.
+	 * For instance, /dev/fd/0 -> /proc/self/fd/0 ->
+	 *    /proc/1475524/fd/0 -> /proc/1475524/fd/pipe:[1177004485]
+	 * Trying to access the resolved name "pipe:[....]" may fail.
+	 * Instead, once we enter /proc, we stop expanding symlinks.
+	 *
+	 * This now results in /dev/fd/0 -> /proc/self/fd/0
+	 */
+	if (strncmp(newpath, "/proc", 5) == 0) {
+		pseudo_debug(PDBGF_PATH | PDBGF_VERBOSE, "paes: %s in /proc\n",
+			newpath ? newpath : "<nil>");
+                is_proc = 1;
+	}
+
 	current = *pcurrent;
 	pseudo_debug(PDBGF_PATH | PDBGF_VERBOSE, "pae: '%s', + '%.*s', is_dir %d\n",
 		newpath, (int) elen, element, is_dir);
@@ -696,6 +712,16 @@ pseudo_append_element(char *newpath, char *root, size_t allocated, char **pcurre
 			}
 			/* null-terminate buffer */
 			linkbuf[linklen] = '\0';
+			if (is_proc) {
+				/* Check that the link target exists, otherwise stop resolving */
+				PSEUDO_STATBUF statbuf;
+
+				if (!pseudo_real_lstat || (pseudo_real_lstat(linkbuf, &statbuf) == -1)) {
+					pseudo_debug(PDBGF_PATH, "proc link target (%s) does not exist, skipping.\n", linkbuf);
+					*pcurrent = current;
+					return 0;
+				}
+			}
 			/* absolute symlink means go back to root */
 			if (*linkbuf == '/') {
 				current = root;
